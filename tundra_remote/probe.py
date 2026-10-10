@@ -6,6 +6,9 @@ r"""Snapshot of the SteamVR devices on this PC, as JSON.
 
 The --file form is what the TundraRemoteProbe scheduled task runs, so the bot can read the
 result over SSH (OpenVR can't be reached from the SSH session itself).
+
+When SteamVR isn't running, the snapshot lists the plugged-in receivers from lighthouse_console
+instead, so the bot can still offer to turn off the trackers paired to them.
 """
 import json
 import os
@@ -18,6 +21,8 @@ from pathlib import Path
 OUT_FILE = Path(os.environ.get("LOCALAPPDATA", ".")) / "tundra-remote" / "probe.json"
 
 TASK_NAME = "TundraRemoteProbe"
+
+LIGHTHOUSE_CONSOLE = Path("steamapps/common/SteamVR/tools/lighthouse/bin/win64/lighthouse_console.exe")
 
 # openvr.EDeviceActivityLevel values
 ACTIVITY = {-1: "unknown", 0: "idle", 1: "active", 2: "active_timeout", 3: "standby", 4: "idle_timeout"}
@@ -33,8 +38,7 @@ def steamvr_running() -> bool:
     return "vrserver.exe" in out
 
 
-def manifest_version() -> str | None:
-    """SteamVR build id from its Steam app manifest, used if OpenVR doesn't give a version."""
+def steam_libraries() -> list[Path]:
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
@@ -45,13 +49,44 @@ def manifest_version() -> str | None:
     vdf = Path(steam) / "steamapps" / "libraryfolders.vdf"
     if vdf.exists():
         libs += [Path(p.replace("\\\\", "\\")) for p in re.findall(r'"path"\s+"(.+)"', vdf.read_text("utf-8", "ignore"))]
-    for lib in libs:
+    return libs
+
+
+def manifest_version() -> str | None:
+    """SteamVR build id from its Steam app manifest, used if OpenVR doesn't give a version."""
+    for lib in steam_libraries():
         acf = lib / "steamapps" / "appmanifest_250820.acf"
         if acf.exists():
             m = re.search(r'"buildid"\s+"(\d+)"', acf.read_text("utf-8", "ignore"))
             if m:
                 return f"build {m.group(1)}"
     return None
+
+
+def receivers() -> list[str] | None:
+    """Serials of the plugged-in lighthouse receivers, from lighthouse_console. It talks to the USB
+    receivers directly, so this works without SteamVR and from an SSH session. None if it can't run."""
+    exe = next((lib / LIGHTHOUSE_CONSOLE for lib in steam_libraries() if (lib / LIGHTHOUSE_CONSOLE).exists()), None)
+    if exe is None:
+        return None
+    try:
+        # leading blank line soaks up a stray byte-order mark, see poweroff.py
+        out = subprocess.run(
+            [str(exe)], input=b"\nquit\n", capture_output=True, timeout=8,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    # "Attached lighthouse receiver devices: N" then one tab-indented serial per line
+    found, listing = [], False
+    for line in out.splitlines():
+        if line.startswith("Attached lighthouse receiver devices"):
+            listing = True
+        elif listing and line.startswith("\t") and line.strip():
+            found.append(line.strip())
+        elif listing:
+            break
+    return found
 
 
 def _prop(system, fn, index, prop, default=None):
@@ -64,13 +99,13 @@ def _prop(system, fn, index, prop, default=None):
 
 def snapshot() -> dict:
     if not steamvr_running():
-        return {"steamvr": False, "time": time.time()}
+        return {"steamvr": False, "receivers": receivers(), "time": time.time()}
 
     import openvr
     try:
         openvr.init(openvr.VRApplication_Background)
     except openvr.error_code.InitError as e:
-        return {"steamvr": False, "error": str(e), "time": time.time()}
+        return {"steamvr": False, "error": str(e), "receivers": receivers(), "time": time.time()}
     try:
         system = openvr.VRSystem()
         try:
@@ -119,8 +154,9 @@ def via_task(timeout: float = 10) -> str:
         except OSError:
             pass
         time.sleep(0.2)
-    # the task only runs while someone is logged on
-    return json.dumps({"steamvr": False, "error": "probe task didn't answer (nobody logged in?)", "time": time.time()})
+    # the task only runs while someone is logged on. lighthouse_console doesn't need a desktop session
+    return json.dumps({"steamvr": False, "error": "probe task didn't answer (nobody logged in?)",
+                       "receivers": receivers(), "time": time.time()})
 
 
 def main():

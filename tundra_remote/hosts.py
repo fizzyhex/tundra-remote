@@ -9,7 +9,7 @@ from . import poweroff, probe
 from .config import ROOT, Config, HostConfig
 from .store import Store
 
-PROBE_TIMEOUT = 15
+PROBE_TIMEOUT = 25  # --via-task waits up to 10s, then may list receivers itself
 POWEROFF_TIMEOUT = 70
 UPDATE_TIMEOUT = 30
 

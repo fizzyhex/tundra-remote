@@ -385,17 +385,23 @@ class TundraRemote(discord.Client):
         name = views.device_label(self.store, {**known, "serial": serial}) if known else serial
         await interaction.response.edit_message(
             view=self.render(results, views.pick_host(results, host), confirm=serial, busy=True,
-                             notice=f"turning off {name}…"))
+                             notice=f"turning off..."))
 
         dongle = (known or {}).get("dongle")
+        steamvr = results.get(host, {}).get("steamvr")
         if host not in self.hosts or not dongle:
             notice = f"don't know how to reach {name}"
         else:
             try:
                 await self.hosts[host].poweroff(dongle)
-                notice = f"turned off {name}"
+                # without steamvr there's no telling if it was on to begin with
+                notice = f"turned off {name}" if steamvr else f"sent {name} the off signal"
             except (HostError, OSError, TimeoutError) as e:
                 notice = f"couldn't turn off {name}: {e}"
+
+        if not steamvr:
+            return await interaction.edit_original_response(
+                view=self.render(results, views.pick_host(results, host), notice=notice))
 
         # SteamVR takes a moment to notice the device dropped
         for _ in range(4):
