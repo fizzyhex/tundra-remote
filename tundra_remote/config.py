@@ -13,6 +13,9 @@ class HostConfig:
     ssh_user: str | None = None
     python: str = "python"          # python on the remote PC that has tundra_remote installed
     remote_dir: str | None = None   # where tundra_remote lives on the remote PC (cwd for python -m)
+    host_key: str | None = None     # pinned ssh host key ("ssh-ed25519 AAAA..."), set by /host pair
+    auth_file: str | None = None    # authorized_keys file the bot's key went into, so /host unpair can take it out
+    node: str | None = None         # tailscale stable node id, set by /host pair
 
 
 @dataclass
@@ -20,10 +23,11 @@ class Config:
     token: str
     op_ids: set[int]
     friend_ids: set[int] = field(default_factory=set)
-    ssh_key: str | None = None
-    ssh_strict: bool = True         # check remote host keys against ~/.ssh/known_hosts
+    ssh_key: str = str(Path.home() / ".ssh" / "tundra_remote")  # made by /host pair if it's missing
+    ssh_strict: bool = True         # check remote host keys against ~/.ssh/known_hosts (paired pcs use their pinned key)
     hosts: list[HostConfig] = field(default_factory=list)
     low_battery: int = 20
+    pair_port: int = 8765           # /host pair serves the setup script on this port, on the tailnet ip only
 
 
 def load(path: Path = ROOT / "config.toml") -> Config:
@@ -33,8 +37,9 @@ def load(path: Path = ROOT / "config.toml") -> Config:
         token=raw["token"],
         op_ids={int(i) for i in raw.get("op_ids", [])},
         friend_ids={int(i) for i in raw.get("friend_ids", [])},
-        ssh_key=raw.get("ssh_key"),
+        ssh_key=raw.get("ssh_key") or Config.ssh_key,
         ssh_strict=raw.get("ssh_strict", True),
         hosts=hosts,
         low_battery=raw.get("low_battery", 20),
+        pair_port=raw.get("pair_port", 8765),
     )

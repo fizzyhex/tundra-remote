@@ -8,7 +8,6 @@ import logging
 import discord
 
 from .config import ROOT
-from .store import Store
 
 log = logging.getLogger(__name__)
 
@@ -44,8 +43,7 @@ def emoji_name(kind: str, state: str) -> str:
 
 
 class Emojis:
-    def __init__(self, store: Store):
-        self.store = store
+    def __init__(self):
         self.by_name: dict[str, discord.Emoji] = {}
 
     async def sync(self, client: discord.Client):
@@ -65,9 +63,6 @@ class Emojis:
                     log.info("uploaded emoji %s from %s", name, path.relative_to(ROOT))
                 except discord.HTTPException as e:
                     log.warning("couldn't upload %s: %s", name, e)
-        self.store.emojis.clear()
-        self.store.emojis.update({n: str(e.id) for n, e in self.by_name.items()})
-        self.store.save()
 
     def get(self, kind: str, state: str):
         return self.by_name.get(emoji_name(kind, state)) or FALLBACK.get(state)

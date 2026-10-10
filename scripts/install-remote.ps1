@@ -12,15 +12,22 @@
 
   Nothing stays running in the background apart from the sshd service.
 
+  Usually you don't run this file yourself: /host pair in Discord gives you a one-liner that
+  fetches it from the bot with -PairUrl. Then the key and scripts come from the bot too, and the
+  bot gets told the rest when it's done. Running it by hand with -PublicKey still works for a PC
+  the bot can't serve to.
+
 .EXAMPLE
   .\install-remote.ps1 -PublicKey 'C:\path\to\tundra_remote.pub'
 #>
 param(
-    [Parameter(Mandatory)] [string]$PublicKey,   # the bot's public key, as a path or the key text
+    [string]$PublicKey,   # the bot's public key, as a path or the key text
+    [string]$PairUrl,     # set by /host pair's one-liner
     [string]$Python = (Get-Command python -ErrorAction SilentlyContinue).Source
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $PublicKey -and -not $PairUrl) { throw 'pass -PublicKey, or use the command /host pair gives you' }
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -41,7 +48,9 @@ New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (
     -Direction Inbound -Protocol TCP -LocalPort 22 -RemoteAddress '100.64.0.0/10' -Action Allow | Out-Null
 
 # 2. authorize the bot's key. Admin accounts use the shared administrators_authorized_keys file.
-$key = if (Test-Path $PublicKey) { (Get-Content $PublicKey -Raw).Trim() } else { $PublicKey.Trim() }
+$key = if ($PairUrl) { (Invoke-RestMethod "$PairUrl/key").Trim() }
+       elseif (Test-Path $PublicKey) { (Get-Content $PublicKey -Raw).Trim() }
+       else { $PublicKey.Trim() }
 $isAdminUser = (Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction SilentlyContinue).Name -contains "$env:USERDOMAIN\$env:USERNAME"
 if ($isAdminUser) {
     $authFile = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
@@ -57,8 +66,10 @@ if ($isAdminUser) { icacls $authFile /inheritance:r /grant 'Administrators:F' /g
 # 3. scripts + pyopenvr
 $app = Join-Path $env:LOCALAPPDATA 'tundra-remote\app\tundra_remote'
 New-Item -ItemType Directory -Force $app | Out-Null
-$src = Join-Path $PSScriptRoot '..\tundra_remote'
-foreach ($f in '__init__.py', 'probe.py', 'poweroff.py') { Copy-Item (Join-Path $src $f) $app -Force }
+foreach ($f in '__init__.py', 'probe.py', 'poweroff.py') {
+    if ($PairUrl) { Invoke-WebRequest "$PairUrl/files/$f" -OutFile (Join-Path $app $f) -UseBasicParsing }
+    else { Copy-Item (Join-Path $PSScriptRoot "..\tundra_remote\$f") $app -Force }
+}
 & $Python -m pip install --user --quiet openvr
 if ($LASTEXITCODE -ne 0) { throw 'pip install openvr failed' }
 
@@ -68,6 +79,24 @@ $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" 
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName 'TundraRemoteProbe' -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+
+# 5. paired from discord: tell the bot how to reach this pc, and the host key to pin
+if ($PairUrl) {
+    $hostKeyFile = Join-Path $env:ProgramData 'ssh\ssh_host_ed25519_key.pub'
+    for ($i = 0; $i -lt 20 -and -not (Test-Path $hostKeyFile); $i++) { Start-Sleep -Milliseconds 500 }
+    if (-not (Test-Path $hostKeyFile)) { throw "sshd didn't make a host key ($hostKeyFile)" }
+    $body = @{
+        ssh_user   = $env:USERNAME
+        python     = $Python
+        remote_dir = Split-Path $app
+        host_key   = (Get-Content $hostKeyFile -Raw).Trim()
+        auth_file  = $authFile
+    } | ConvertTo-Json
+    $r = Invoke-RestMethod "$PairUrl/done" -Method Post -Body $body -ContentType 'application/json'
+    Write-Host ''
+    Write-Host "done. paired as $($r.name), check discord."
+    return
+}
 
 $ip = try { & tailscale ip -4 2>$null | Select-Object -First 1 } catch { $null }
 Write-Host ''

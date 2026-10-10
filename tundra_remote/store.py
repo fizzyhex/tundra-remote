@@ -1,4 +1,4 @@
-"""data.json: nicknames, devices seen before (so off ones still show), emoji ids."""
+"""data.json: nicknames, devices seen before (so off ones still show), paired pcs."""
 import json
 from pathlib import Path
 
@@ -14,8 +14,9 @@ class Store:
             self.data = json.loads(path.read_text("utf-8"))
         except (OSError, ValueError):
             self.data = {}
-        for key in ("device_nicks", "host_nicks", "seen", "emojis"):
+        for key in ("device_nicks", "host_nicks", "seen", "hosts"):
             self.data.setdefault(key, {})
+        self.data.pop("emojis", None)  # older versions saved emoji ids here
 
     def save(self):
         tmp = self.path.with_suffix(".tmp")
@@ -60,7 +61,16 @@ class Store:
         if changed:
             self.save()
 
-    # application emoji ids, keyed by emoji name
+    # pcs added with /host pair, keyed by name. values are HostConfig fields.
     @property
-    def emojis(self) -> dict[str, str]:
-        return self.data["emojis"]
+    def hosts(self) -> dict[str, dict]:
+        return self.data["hosts"]
+
+    def add_host(self, name: str, entry: dict):
+        self.data["hosts"][name] = entry
+        self.save()
+
+    def remove_host(self, name: str):
+        self.data["hosts"].pop(name, None)
+        self.data["seen"].pop(name, None)
+        self.save()
