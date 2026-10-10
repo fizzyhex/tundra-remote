@@ -11,6 +11,7 @@ from .store import Store
 
 PROBE_TIMEOUT = 25  # --via-task waits up to 10s, then may list receivers itself
 POWEROFF_TIMEOUT = 70
+POWEROFF_EACH = 5  # extra per receiver when turning off several at once
 UPDATE_TIMEOUT = 30
 
 # what a remote PC needs from tundra_remote/
@@ -46,7 +47,7 @@ class Host:
     async def probe(self) -> dict:
         raise NotImplementedError
 
-    async def poweroff(self, receiver: str) -> None:
+    async def poweroff(self, receivers: list[str]) -> None:
         raise NotImplementedError
 
 
@@ -61,8 +62,8 @@ class LocalHost(Host):
     async def probe(self) -> dict:
         return await asyncio.wait_for(asyncio.to_thread(self._snapshot), PROBE_TIMEOUT)
 
-    async def poweroff(self, receiver: str) -> None:
-        await asyncio.to_thread(poweroff.poweroff, [receiver])
+    async def poweroff(self, receivers: list[str]) -> None:
+        await asyncio.to_thread(poweroff.poweroff, receivers)
 
 
 class SshHost(Host):
@@ -129,10 +130,12 @@ class SshHost(Host):
         except ValueError:
             raise HostError("got junk back from the probe")
 
-    async def poweroff(self, receiver: str) -> None:
-        if not re.fullmatch(r"[0-9A-Za-z-]+", receiver):
-            raise HostError(f"bad receiver serial: {receiver!r}")
-        await self._run(f"{self._script('poweroff.py')} {receiver}", POWEROFF_TIMEOUT)
+    async def poweroff(self, receivers: list[str]) -> None:
+        for rx in receivers:
+            if not re.fullmatch(r"[0-9A-Za-z-]+", rx):
+                raise HostError(f"bad receiver serial: {rx!r}")
+        await self._run(f"{self._script('poweroff.py')} {' '.join(receivers)}",
+                        POWEROFF_TIMEOUT + POWEROFF_EACH * len(receivers))
 
     async def update(self) -> None:
         """Copies this repo's probe/poweroff scripts over the remote PC's copies."""

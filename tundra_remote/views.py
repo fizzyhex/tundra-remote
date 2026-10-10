@@ -3,6 +3,7 @@
 Nothing here has callbacks. Every component has a "tr:..." custom_id that commands.py
 routes in on_interaction, so buttons keep working after the bot restarts.
 """
+from collections.abc import Collection
 from dataclasses import dataclass
 
 import discord
@@ -30,6 +31,30 @@ def device_label(store: Store, d: dict) -> str:
         return nick
     model = (d.get("model") or d.get("class") or "device").lower()
     return f"{model} {d['serial'][-4:].lower()}"
+
+
+def join(names: list[str]) -> str:
+    """a, b and c"""
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+
+
+def can_act(d: Device) -> bool:
+    return bool(d.cls in ACTIONABLE and d.state != "off" and d.dongle)
+
+
+def selected_in(message: discord.Message | None, host: str) -> set[str]:
+    """Serials picked on a /status message: its blue device buttons. Keeping the picks on
+    the message itself means they survive a restart, like everything else here."""
+    out, todo = set(), list(message.components if message else ())
+    prefix = f"tr:dev:{host}:"
+    while todo:
+        c = todo.pop()
+        todo += getattr(c, "children", None) or ()
+        todo += [x for x in (getattr(c, "accessory", None), getattr(c, "component", None)) if x]
+        cid = getattr(c, "custom_id", None) or ""
+        if cid.startswith(prefix) and getattr(c, "style", None) is discord.ButtonStyle.primary:
+            out.add(cid[len(prefix):])
+    return out
 
 
 def usable(result: dict) -> bool:
@@ -87,8 +112,10 @@ def pick_host(results: dict[str, dict], preferred: str | None) -> str | None:
 
 def render(
     *, store: Store, emojis: Emojis, results: dict[str, dict], host: str | None,
-    low_battery: int, confirm: str | None = None, notice: str | None = None, busy: bool = False,
+    low_battery: int, selected: Collection[str] = (), notice: str | None = None, busy: bool = False,
 ) -> ui.LayoutView:
+    """selected: serials picked to turn off. Picked buttons are blue, which is how
+    selected_in() reads the picks back off the message."""
     view = ui.LayoutView(timeout=60)
     container = ui.Container(accent_colour=discord.Colour(0x3B82C4))
     hosts = [h for h, r in results.items() if usable(r)]
@@ -101,7 +128,7 @@ def render(
         if result.get("steamvr"):
             header = f"## {store.host_nick(host)} ▚ steamvr {result.get('version') or ''}".rstrip()
         else:
-            header = f"## {store.host_nick(host)} ▚ steamvr's off"
+            header = f"## {store.host_nick(host)} ▚ (steamvr offline)"
             header += "\n-# can't tell what's on without it, but you can still turn things off"
         if updated:
             header += f"\n-# updated <t:{updated}:R>"
@@ -115,28 +142,33 @@ def render(
         devices = devices_for(store, host, results[host], low_battery)
         if not devices:
             container.add_item(ui.TextDisplay("no devices yet"))
+        actionable = [d.serial for d in devices if can_act(d)]
+        selected = [s for s in actionable if s in selected]
         row = None
         for i, d in enumerate(devices):
             if i % 5 == 0:
                 row = ui.ActionRow()
                 container.add_item(row)
-            can_act = d.cls in ACTIONABLE and d.state != "off" and d.dongle
             row.add_item(ui.Button(
                 label=d.label, emoji=emojis.get(d.kind, "off" if d.state == "unknown" else d.state),
-                style=discord.ButtonStyle.primary if d.serial == confirm else discord.ButtonStyle.secondary,
-                custom_id=f"tr:dev:{host}:{d.serial}", disabled=busy or not can_act,
+                style=discord.ButtonStyle.primary if d.serial in selected else discord.ButtonStyle.secondary,
+                custom_id=f"tr:dev:{host}:{d.serial}", disabled=busy or not can_act(d),
             ))
 
-        if confirm is not None:
-            name = next((d.label.split(" · ")[0] for d in devices if d.serial == confirm), confirm)
+        if selected:
+            names = join([f"**{d.label.split(' · ')[0]}**" for d in devices if d.serial in selected])
             container.add_item(ui.Separator())
-            container.add_item(ui.TextDisplay(f"turn off **{name}**?"))
-            container.add_item(ui.ActionRow(
-                ui.Button(label="turn it off", style=discord.ButtonStyle.danger,
-                          custom_id=f"tr:yes:{host}:{confirm}", disabled=busy),
+            container.add_item(ui.TextDisplay(f"turn off {names}?"))
+            buttons = [
+                ui.Button(label="turn it off" if len(selected) == 1 else f"turn {len(selected)} off",
+                          style=discord.ButtonStyle.danger, custom_id=f"tr:yes:{host}", disabled=busy),
                 ui.Button(label="nevermind", style=discord.ButtonStyle.secondary,
                           custom_id=f"tr:no:{host}", disabled=busy),
-            ))
+            ]
+            if len(selected) < len(actionable):
+                buttons.insert(1, ui.Button(label="pick all", style=discord.ButtonStyle.secondary,
+                                            custom_id=f"tr:all:{host}", disabled=busy))
+            container.add_item(ui.ActionRow(*buttons))
 
     if len(hosts) > 1:
         container.add_item(ui.ActionRow(ui.Select(
@@ -156,7 +188,7 @@ def render(
         elif not r.get("steamvr"):
             footer.append(f"{store.host_nick(h)}: not running")
     if notice:
-        footer.insert(0, notice)
+        footer[:0] = notice.splitlines()
     if footer:
         container.add_item(ui.TextDisplay("\n".join(f"-# {line}" for line in footer)))
 

@@ -343,7 +343,7 @@ class TundraRemote(discord.Client):
         role = self.role(interaction.user)
         if role is None:
             return await interaction.response.send_message(NOPE, ephemeral=True)
-        if action in ("dev", "yes", "no") and role != "op":
+        if action in ("dev", "all", "yes", "no") and role != "op":
             return await interaction.response.send_message(FRIEND_NOPE, ephemeral=True)
 
         try:
@@ -359,55 +359,71 @@ class TundraRemote(discord.Client):
                 host = views.pick_host(results, interaction.data["values"][0])
                 await interaction.edit_original_response(view=self.render(results, host))
 
-            elif action in ("dev", "no"):
-                # reuse the last probe so the confirm shows up instantly; after a restart there isn't one
+            elif action in ("dev", "all", "no"):
+                # reuse the last probe so picking feels instant; after a restart there isn't one
                 if self.last:
                     results = self.last
                 else:
                     await interaction.response.defer()
                     results = await self.probe()
                 host = views.pick_host(results, parts[2])
-                view = self.render(results, host, confirm=parts[3] if action == "dev" else None)
+                selected = views.selected_in(interaction.message, parts[2]) if host == parts[2] else set()
+                if action == "dev":
+                    selected ^= {parts[3]}
+                elif action == "all" and host is not None:
+                    selected = {d.serial for d in views.devices_for(self.store, host, results[host], self.config.low_battery)}
+                elif action == "no":
+                    selected = set()
+                view = self.render(results, host, selected=selected)
                 if interaction.response.is_done():
                     await interaction.edit_original_response(view=view)
                 else:
                     await interaction.response.edit_message(view=view)
 
             elif action == "yes":
-                await self.turn_off(interaction, parts[2], parts[3])
+                await self.turn_off(interaction, parts[2], views.selected_in(interaction.message, parts[2]))
         except discord.HTTPException:
             log.exception("interaction %s failed", custom_id)
 
-    async def turn_off(self, interaction: discord.Interaction, host: str, serial: str):
+    async def turn_off(self, interaction: discord.Interaction, host: str, serials: set[str]):
         results = self.last
-        current = next((d for d in results.get(host, {}).get("devices", []) if d.get("serial") == serial), None)
-        known = current or self.store.seen(host).get(serial)
-        name = views.device_label(self.store, {**known, "serial": serial}) if known else serial
+        current = {d["serial"]: d for d in results.get(host, {}).get("devices", []) if d.get("serial")}
+        known = {s: current.get(s) or self.store.seen(host).get(s) for s in serials}
+        names = {s: views.device_label(self.store, {**k, "serial": s}) if k else s for s, k in known.items()}
+        if not serials:
+            return await interaction.response.edit_message(
+                view=self.render(results, views.pick_host(results, host), notice="nothing's picked"))
         await interaction.response.edit_message(
-            view=self.render(results, views.pick_host(results, host), confirm=serial, busy=True,
-                             notice=f"turning off..."))
+            view=self.render(results, views.pick_host(results, host), selected=serials, busy=True,
+                             notice="turning off..."))
 
-        dongle = (known or {}).get("dongle")
+        reachable = [s for s in sorted(serials) if (known[s] or {}).get("dongle")]
+        lost = [names[s] for s in sorted(serials) if s not in reachable]
         steamvr = results.get(host, {}).get("steamvr")
-        if host not in self.hosts or not dongle:
-            notice = f"don't know how to reach {name}"
-        else:
+        notices = []
+        if host not in self.hosts:
+            reachable, lost = [], list(names.values())
+        if reachable:
+            done = views.join([names[s] for s in reachable])
             try:
-                await self.hosts[host].poweroff(dongle)
+                await self.hosts[host].poweroff(list(dict.fromkeys(known[s]["dongle"] for s in reachable)))
                 # without steamvr there's no telling if it was on to begin with
-                notice = f"turned off {name}" if steamvr else f"sent {name} the off signal"
+                notices.append(f"turned off {done}" if steamvr else f"sent {done} the off signal")
             except (HostError, OSError, TimeoutError) as e:
-                notice = f"couldn't turn off {name}: {e}"
+                notices.append(f"couldn't turn off {done}: {e}")
+        if lost:
+            notices.append(f"don't know how to reach {views.join(lost)}")
+        notice = "\n".join(notices)
 
-        if not steamvr:
+        if not steamvr or not reachable:
             return await interaction.edit_original_response(
                 view=self.render(results, views.pick_host(results, host), notice=notice))
 
-        # SteamVR takes a moment to notice the device dropped
+        # SteamVR takes a moment to notice the devices dropped
         for _ in range(4):
             await asyncio.sleep(2)
             results = await self.probe()
-            d = next((d for d in results.get(host, {}).get("devices", []) if d.get("serial") == serial), None)
-            if not d or not d.get("connected"):
+            devices = {d.get("serial"): d for d in results.get(host, {}).get("devices", [])}
+            if not any(devices.get(s, {}).get("connected") for s in reachable):
                 break
         await interaction.edit_original_response(view=self.render(results, views.pick_host(results, host), notice=notice))

@@ -49,7 +49,7 @@ def poweroff(receivers: list[str]) -> str:
         if not re.fullmatch(r"[0-9A-Za-z-]+", rx):
             raise ValueError(f"bad receiver serial: {rx!r}")
         cmds += [f"serial {rx}", "sleep 1500", "poweroff", "sleep 500"]
-    return invoke_lighthouse(cmds)
+    return invoke_lighthouse(cmds, timeout=60 + 5 * len(receivers))
 
 
 def main():
