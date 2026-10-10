@@ -23,3 +23,13 @@ These are Valve's and the driver makers' artwork. Don't redistribute them withou
 - `probe.py` and `poweroff.py` get copied to remote PCs and run as plain scripts, so keep them to the standard library plus `openvr`, with no relative imports.
 - Component custom_ids are `tr:<action>:...` and are routed in `TundraRemote.on_interaction`, not in view callbacks, so buttons survive restarts.
 - User-facing text is casual and lower-case.
+
+## Co-Authoring Policy
+
+Agents must only co-sign commits following this schema:
+
+```
+Co-signed by virtual <cat species> 🐾 / <pseudo-email>
+```
+
+Example: Co-signed by virtual calico 🐾 / kindcalico@donotreply.com
