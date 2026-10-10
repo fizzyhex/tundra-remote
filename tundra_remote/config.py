@@ -32,7 +32,7 @@ class Config:
 
 def load(path: Path = ROOT / "config.toml") -> Config:
     raw = tomllib.loads(path.read_text("utf-8"))
-    hosts = [HostConfig(**h) for h in raw.get("hosts", [])] or [HostConfig(name="this-pc", local=True)]
+    hosts = [HostConfig(**h) for h in raw.get("hosts", [])]
     return Config(
         token=raw["token"],
         op_ids={int(i) for i in raw.get("op_ids", [])},

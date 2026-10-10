@@ -5,8 +5,8 @@ A Discord bot for checking and turning off your SteamVR controllers and trackers
 - `/status`: SteamVR version, every device with its battery, and a button per device. Click a controller or tracker to turn it off. If more than one PC is running SteamVR, a dropdown switches between them.
 - `/device nick <device> <nickname>`: name a device ("left foot"). Leave the nickname empty to clear it.
 - `/host nick <pc> <nickname>`: name a PC for the dropdown.
-- `/host pair <pc> [name]`: set up another PC on your tailnet. See [Adding another PC](#adding-another-pc).
-- `/host unpair <pc>`: forget a paired PC and take the bot's key off it.
+- `/host pair <pc> [name]`: set up another PC on your tailnet. See [Adding another PC](#adding-another-pc). Pick "this pc" (`local`) to add back the PC the bot runs on.
+- `/host unpair <pc>`: forget a paired PC and take the bot's key off it. On the bot's own PC, this just hides it from `/status`, for when you don't play VR on it.
 - `/host update [pc]`: copy this repo's `probe.py`/`poweroff.py` to the other PCs after you change or pull them.
 
 Ops (`op_ids`) can do everything. Friends (`friend_ids`) can run `/status` and switch PCs, but can't turn anything off.
@@ -23,6 +23,8 @@ A device that's off can't be turned back on from here. Its radio is off, so pick
    ```
 3. Copy `config.example.toml` to `config.toml`, then fill in the token and your Discord user id.
 4. Run it with `.venv\Scripts\python -m tundra_remote`.
+
+The PC running the bot shows up in `/status` as `this-pc`. Rename it with `/host nick`, or take it off with `/host unpair` if you don't play VR on it.
 
 On first start, the bot uploads its status icons from `icons/` as application emojis (Developer Portal → your app → Emojis). These are Valve's and the driver makers' artwork. They're only visible through your own bot, but don't make the bot public without checking. If an upload fails, the buttons use plain emoji instead.
 

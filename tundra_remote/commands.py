@@ -8,7 +8,7 @@ from discord import app_commands
 from . import tailnet, views
 from .config import Config, HostConfig
 from .emojis import Emojis
-from .hosts import Host, HostError, SshHost, make_hosts, probe_all
+from .hosts import Host, HostError, LocalHost, SshHost, make_hosts, probe_all
 from .pairing import Pairing, ensure_key
 from .store import Store
 
@@ -16,6 +16,11 @@ log = logging.getLogger(__name__)
 
 NOPE = "you can't use this"
 FRIEND_NOPE = "friends can look, not touch :P"
+LOCAL = "local"  # /host pair's pc value for the bot's own pc
+
+
+def clean_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")[:32]
 
 
 class TundraRemote(discord.Client):
@@ -144,24 +149,28 @@ class TundraRemote(discord.Client):
             return [app_commands.Choice(name=f"{h} · {self.store.host_nick(h)}"[:100], value=h)
                     for h in self.hosts if current.lower() in f"{h} {self.store.host_nick(h)}".lower()][:25]
 
-        @host_group.command(name="pair", description="set up another pc on your tailnet")
-        @app_commands.describe(pc="the pc, from your tailnet", name="what to call it here (defaults to its machine name)")
+        @host_group.command(name="pair", description="set up another pc on your tailnet, or this one")
+        @app_commands.describe(pc="the pc, from your tailnet (or \"local\" for the one the bot runs on)",
+                               name="what to call it here (defaults to its machine name)")
         async def host_pair(interaction: discord.Interaction, pc: str, name: str | None = None):
             if self.role(interaction.user) != "op":
                 return await interaction.response.send_message(NOPE, ephemeral=True)
             await interaction.response.defer(ephemeral=True, thinking=True)
+            if pc == LOCAL:
+                return await self.pair_local(interaction, name)
             try:
-                _, peers = await tailnet.status()
+                me, peers = await tailnet.status()
             except tailnet.TailnetError as e:
                 return await interaction.followup.send(f"can't see the tailnet: {e}", ephemeral=True)
+            if me.id == pc or me.matches(pc):
+                return await self.pair_local(interaction, name)
             peer = next((p for p in peers if p.id == pc or p.matches(pc)), None)
             if not peer:
                 return await interaction.followup.send(f"`{pc}` isn't on your tailnet", ephemeral=True)
             if paired := self.paired_as(peer):
                 return await interaction.followup.send(f"**{peer.name}** is already set up as `{paired}`", ephemeral=True)
-            name = re.sub(r"[^a-z0-9-]+", "-", (name or peer.name).lower()).strip("-")[:32]
-            taken = {p.name for p in self.pairing.pending.values() if p.peer.id != peer.id}
-            if not name or name in self.hosts or name in taken:
+            name = clean_name(name or peer.name)
+            if not name or name in self.hosts or name in self.pending_names(peer.id):
                 return await interaction.followup.send(f"there's already a pc called `{name}`, pick another name", ephemeral=True)
 
             async def done(cfg: HostConfig):
@@ -184,21 +193,31 @@ class TundraRemote(discord.Client):
 
         @host_pair.autocomplete("pc")
         async def pair_ac(interaction: discord.Interaction, current: str):
+            choices = []
+            if not self.local_host() and current.lower() in "this pc local":
+                choices.append(app_commands.Choice(name="this pc (the one the bot runs on)", value=LOCAL))
             try:
                 _, peers = await tailnet.status()
             except tailnet.TailnetError:
-                return []
+                return choices
             peers = [p for p in peers if p.os == "windows" and not self.paired_as(p)
                      and current.lower() in f"{p.name} {p.ip}".lower()]
             peers.sort(key=lambda p: (not p.online, p.name))
-            return [app_commands.Choice(name=f"{p.name} · {p.ip}{'' if p.online else ' · offline'}", value=p.ip)
-                    for p in peers][:25]
+            choices += [app_commands.Choice(name=f"{p.name} · {p.ip}{'' if p.online else ' · offline'}", value=p.ip)
+                        for p in peers]
+            return choices[:25]
 
         @host_group.command(name="unpair", description="forget a pc added with /host pair, and take the bot's key off it")
         @app_commands.describe(pc="the pc")
         async def host_unpair(interaction: discord.Interaction, pc: str):
             if self.role(interaction.user) != "op":
                 return await interaction.response.send_message(NOPE, ephemeral=True)
+            if pc == self.paired_local():
+                self.store.set_local(None)
+                self.hosts.pop(pc, None)
+                self.last.pop(pc, None)
+                return await interaction.response.send_message(
+                    f"took `{pc}` (this pc) off. /host pair `local` brings it back", ephemeral=True)
             if pc not in self.store.hosts:
                 why = "it's in config.toml, take it out there" if pc in self.hosts else "no such pc"
                 return await interaction.response.send_message(f"`{pc}` wasn't added with /host pair ({why})", ephemeral=True)
@@ -219,8 +238,11 @@ class TundraRemote(discord.Client):
 
         @host_unpair.autocomplete("pc")
         async def unpair_ac(interaction: discord.Interaction, current: str):
+            names = list(self.store.hosts)
+            if local := self.paired_local():
+                names.insert(0, local)
             return [app_commands.Choice(name=f"{h} · {self.store.host_nick(h)}"[:100], value=h)
-                    for h in self.store.hosts if current.lower() in f"{h} {self.store.host_nick(h)}".lower()][:25]
+                    for h in names if current.lower() in f"{h} {self.store.host_nick(h)}".lower()][:25]
 
         @host_group.command(name="update", description="copy the latest probe scripts to the other pcs")
         @app_commands.describe(pc="just this pc (default: all of them)")
@@ -262,6 +284,30 @@ class TundraRemote(discord.Client):
             if isinstance(host, SshHost) and (host.cfg.node == peer.id or peer.matches(host.cfg.tailnet_host or "")):
                 return name
         return None
+
+    def pending_names(self, peer_id: str | None = None) -> set[str]:
+        """Names waiting on a pairing code, other than this peer's own."""
+        return {p.name for p in self.pairing.pending.values() if p.peer.id != peer_id}
+
+    def local_host(self) -> str | None:
+        """Name of the bot's own pc, if it's a host at all (from config.toml or data.json)."""
+        return next((h for h, host in self.hosts.items() if isinstance(host, LocalHost)), None)
+
+    def paired_local(self) -> str | None:
+        """The bot's own pc when it comes from data.json, so /host unpair can take it off."""
+        if any(h.local for h in self.config.hosts):
+            return None
+        return self.store.local if self.store.local in self.hosts else None
+
+    async def pair_local(self, interaction: discord.Interaction, name: str | None):
+        if have := self.local_host():
+            return await interaction.followup.send(f"this pc is already set up as `{have}`", ephemeral=True)
+        name = clean_name(name or "this-pc")
+        if not name or name in self.hosts or name in self.pending_names():
+            return await interaction.followup.send(f"there's already a pc called `{name}`, pick another name", ephemeral=True)
+        self.store.set_local(name)
+        self.hosts = {name: LocalHost(HostConfig(name=name, local=True)), **self.hosts}
+        await interaction.followup.send(f"added this pc as `{name}`. {await self.test_probe(name)}", ephemeral=True)
 
     def add_paired(self, cfg: HostConfig):
         self.store.add_host(cfg.name, {k: v for k, v in vars(cfg).items() if k not in ("name", "local") and v is not None})

@@ -19,10 +19,11 @@ ssh_strict = true
 # /host pair serves the setup script on this port, on the bot pc's tailnet ip, only while a code is waiting
 pair_port = 8765
 
-# the pc the bot runs on
-[[hosts]]
-name = "desk"
-local = true
+# the pc the bot runs on is always included as "this-pc" (/host unpair takes it off, /host pair local
+# brings it back). to pin it here instead, so it can't be taken off from discord:
+# [[hosts]]
+# name = "desk"
+# local = true
 
 # other pcs are easiest to add with /host pair, which keeps them in data.json.
 # or set one up by hand with scripts/install-remote.ps1 -PublicKey and list it here:

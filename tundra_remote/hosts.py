@@ -159,8 +159,11 @@ class SshHost(Host):
 
 
 def make_hosts(config: Config, store: Store) -> dict[str, Host]:
-    """Hosts from config.toml, then the ones added with /host pair (config.toml wins on a name clash)."""
+    """The bot's own pc, hosts from config.toml, then the ones added with /host pair (config.toml wins on
+    a name clash). The bot's pc comes from data.json unless config.toml lists a local host."""
     hosts = {}
+    if store.local and not any(h.local for h in config.hosts):
+        hosts[store.local] = LocalHost(HostConfig(name=store.local, local=True))
     for h in config.hosts:
         hosts[h.name] = LocalHost(h) if h.local else SshHost(h, config.ssh_key, config.ssh_strict)
     for name, entry in store.hosts.items():

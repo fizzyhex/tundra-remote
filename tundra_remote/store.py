@@ -1,4 +1,4 @@
-"""data.json: nicknames, devices seen before (so off ones still show), paired pcs."""
+"""data.json: nicknames, devices seen before (so off ones still show), paired pcs, the bot pc's name."""
 import json
 from pathlib import Path
 
@@ -16,6 +16,7 @@ class Store:
             self.data = {}
         for key in ("device_nicks", "host_nicks", "seen", "hosts"):
             self.data.setdefault(key, {})
+        self.data.setdefault("local", "this-pc")
         self.data.pop("emojis", None)  # older versions saved emoji ids here
 
     def save(self):
@@ -73,4 +74,15 @@ class Store:
     def remove_host(self, name: str):
         self.data["hosts"].pop(name, None)
         self.data["seen"].pop(name, None)
+        self.save()
+
+    # the bot's own pc, unless config.toml has a local host. None after /host unpair takes it off.
+    @property
+    def local(self) -> str | None:
+        return self.data["local"]
+
+    def set_local(self, name: str | None):
+        if name is None and self.data["local"]:
+            self.data["seen"].pop(self.data["local"], None)
+        self.data["local"] = name
         self.save()
