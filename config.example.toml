@@ -1,0 +1,28 @@
+# copy to config.toml and fill in. config.toml is gitignored.
+
+token = "your bot token"
+
+# discord user ids. ops can do everything, friends can only look.
+op_ids = [123456789012345678]
+friend_ids = []
+
+# battery % at or below which a device shows the low icon
+low_battery = 20
+
+# private key the bot uses to ssh into the other pcs (its .pub goes on each of them)
+ssh_key = 'C:\Users\you\.ssh\tundra_remote'
+# check remote host keys against ~/.ssh/known_hosts. ssh into each pc once by hand to add it.
+ssh_strict = true
+
+# the pc the bot runs on
+[[hosts]]
+name = "desk"
+local = true
+
+# other pcs on your tailnet, set up with scripts/install-remote.ps1
+# [[hosts]]
+# name = "laptop"
+# tailnet_host = "laptop"          # magicdns name or 100.x.y.z
+# ssh_user = "you"
+# python = 'C:\Python314\python.exe'
+# remote_dir = 'C:\Users\you\AppData\Local\tundra-remote\app'   # this is the default
