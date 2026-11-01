@@ -1,12 +1,12 @@
 # tundra remote
 
 ```sh
-.venv\Scripts\python -m tundra_remote
+.venv/Scripts/python -m tundra_remote
 ```
 
 A Discord bot for checking and turning off your SteamVR controllers and trackers, across every PC on your tailnet.
 
-- `/status`: every device with its battery. Click a controller or tracker to turn it off. If more than one PC is running SteamVR, a dropdown switches between them.
+- `/status`: every device with its battery. Click a controller or tracker to turn it off. If more than one PC is running SteamVR, a dropdown switches between them. `/status live:true` (or the **live** button under it) keeps it refreshing every 10 seconds until 20 minutes go by without a click.
 - `/device nick <device> <nickname>`: name a device ("left foot"). Leave the nickname empty to clear it.
 - `/host nick <pc> <nickname>`: name a PC for the dropdown.
 - `/host pair <pc> [name]`: add another PC. See [Adding another PC](#adding-another-pc).
