@@ -42,19 +42,31 @@ def can_act(d: Device) -> bool:
     return bool(d.cls in ACTIONABLE and d.state != "off" and d.dongle)
 
 
-def selected_in(message: discord.Message | None, host: str) -> set[str]:
-    """Serials picked on a /status message: its blue device buttons. Keeping the picks on
-    the message itself means they survive a restart, like everything else here."""
-    out, todo = set(), list(message.components if message else ())
-    prefix = f"tr:dev:{host}:"
+def _components(message: discord.Message | None):
+    todo = list(message.components if message else ())
     while todo:
         c = todo.pop()
         todo += getattr(c, "children", None) or ()
         todo += [x for x in (getattr(c, "accessory", None), getattr(c, "component", None)) if x]
+        yield c
+
+
+def selected_in(message: discord.Message | None, host: str) -> set[str]:
+    """Serials picked on a /status message: its blue device buttons. Keeping the picks on
+    the message itself means they survive a restart, like everything else here."""
+    out = set()
+    prefix = f"tr:dev:{host}:"
+    for c in _components(message):
         cid = getattr(c, "custom_id", None) or ""
         if cid.startswith(prefix) and getattr(c, "style", None) is discord.ButtonStyle.primary:
             out.add(cid[len(prefix):])
     return out
+
+
+def live_in(message: discord.Message | None) -> bool:
+    """Whether a /status message is live: its live button is green."""
+    return any((getattr(c, "custom_id", None) or "").startswith("tr:live:")
+               and getattr(c, "style", None) is discord.ButtonStyle.success for c in _components(message))
 
 
 def usable(result: dict) -> bool:
@@ -113,9 +125,11 @@ def pick_host(results: dict[str, dict], preferred: str | None) -> str | None:
 def render(
     *, store: Store, emojis: Emojis, results: dict[str, dict], host: str | None,
     low_battery: int, selected: Collection[str] = (), notice: str | None = None, busy: bool = False,
+    live: bool = False,
 ) -> ui.LayoutView:
     """selected: serials picked to turn off. Picked buttons are blue, which is how
-    selected_in() reads the picks back off the message."""
+    selected_in() reads the picks back off the message. The live button is green when
+    live, for live_in()."""
     view = ui.LayoutView(timeout=60)
     container = ui.Container(accent_colour=discord.Colour(0x3B82C4))
     hosts = [h for h, r in results.items() if usable(r)]
@@ -193,4 +207,8 @@ def render(
         container.add_item(ui.TextDisplay("\n".join(f"-# {line}" for line in footer)))
 
     view.add_item(container)
+    view.add_item(ui.ActionRow(ui.Button(
+        label="live", style=discord.ButtonStyle.success if live else discord.ButtonStyle.secondary,
+        custom_id=f"tr:live:{host or ''}", disabled=busy,
+    )))
     return view

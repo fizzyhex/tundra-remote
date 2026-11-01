@@ -1,6 +1,9 @@
 import asyncio
+import contextlib
 import logging
 import re
+import time
+from dataclasses import dataclass, field
 
 import discord
 from discord import app_commands
@@ -17,10 +20,28 @@ log = logging.getLogger(__name__)
 NOPE = "you can't use this"
 FRIEND_NOPE = "friends can look, not touch :P"
 LOCAL = "local"  # /host pair's pc value for the bot's own pc
+LIVE_EVERY = 10  # seconds between live refreshes
+LIVE_FOR = 20 * 60  # live turns off after this long without a click
+TOKEN_FOR = 14 * 60  # interaction tokens last 15 minutes; stop using one a bit before
 
 
 def clean_name(name: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")[:32]
+
+
+@dataclass
+class Live:
+    """A live /status message: what it last showed, and the latest click on it."""
+    interaction: discord.Interaction  # its token can edit the message for 15 minutes
+    channel_id: int | None
+    touched: float  # time.monotonic() of that click
+    host: str | None = None
+    selected: set[str] = field(default_factory=set)
+    notice: str | None = None
+    busy: bool = False
+    version: int = 0  # bumped on every click, so a refresh that started before one gets dropped
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    task: asyncio.Task | None = None
 
 
 class TundraRemote(discord.Client):
@@ -32,6 +53,8 @@ class TundraRemote(discord.Client):
         self.hosts: dict[str, Host] = make_hosts(config, self.store)
         self.pairing = Pairing(config.pair_port, config.ssh_key)
         self.last: dict[str, dict] = {}  # last probe results, per host
+        self.last_at = 0.0
+        self.live: dict[int, Live] = {}  # by message id
         self.tree = app_commands.CommandTree(self)
         self._add_commands()
 
@@ -75,6 +98,7 @@ class TundraRemote(discord.Client):
             if r.get("steamvr"):
                 self.store.remember(host, r.get("devices", []))
         self.last = results
+        self.last_at = time.monotonic()
         return results
 
     def render(self, results, host, **kw):
@@ -93,14 +117,17 @@ class TundraRemote(discord.Client):
         contexts = app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 
         @tree.command(name="status", description="show your steamvr devices")
+        @app_commands.describe(live="keep it updating every 10 seconds")
         @installs
         @contexts
-        async def status(interaction: discord.Interaction):
+        async def status(interaction: discord.Interaction, live: bool = False):
             if not self.role(interaction.user):
                 return await interaction.response.send_message(NOPE, ephemeral=True)
             await interaction.response.defer(thinking=True)
             results = await self.probe()
-            await interaction.followup.send(view=self.render(results, self.default_host(results)))
+            host = self.default_host(results)
+            message = await interaction.followup.send(view=self.render(results, host, live=live), wait=True)
+            self.live_track(message.id, interaction, live, host, {})
 
         device = app_commands.Group(name="device", description="manage devices",
                                     allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
@@ -345,21 +372,22 @@ class TundraRemote(discord.Client):
             return await interaction.response.send_message(NOPE, ephemeral=True)
         if action in ("dev", "all", "yes", "no") and role != "op":
             return await interaction.response.send_message(FRIEND_NOPE, ephemeral=True)
+        live = views.live_in(interaction.message)
 
         try:
             if action == "refresh":
                 await interaction.response.defer()
                 results = await self.probe()
                 host = views.pick_host(results, parts[2] or None)
-                await interaction.edit_original_response(view=self.render(results, host))
+                await self.show(interaction, results, host, live=live)
 
             elif action == "host":
                 await interaction.response.defer()
                 results = await self.probe()
                 host = views.pick_host(results, interaction.data["values"][0])
-                await interaction.edit_original_response(view=self.render(results, host))
+                await self.show(interaction, results, host, live=live)
 
-            elif action in ("dev", "all", "no"):
+            elif action in ("dev", "all", "no", "live"):
                 # reuse the last probe so picking feels instant; after a restart there isn't one
                 if self.last:
                     results = self.last
@@ -374,28 +402,36 @@ class TundraRemote(discord.Client):
                     selected = {d.serial for d in views.devices_for(self.store, host, results[host], self.config.low_battery)}
                 elif action == "no":
                     selected = set()
-                view = self.render(results, host, selected=selected)
-                if interaction.response.is_done():
-                    await interaction.edit_original_response(view=view)
-                else:
-                    await interaction.response.edit_message(view=view)
+                elif action == "live":
+                    live = not live
+                await self.show(interaction, results, host, live=live, selected=selected)
 
             elif action == "yes":
-                await self.turn_off(interaction, parts[2], views.selected_in(interaction.message, parts[2]))
+                await self.turn_off(interaction, parts[2], views.selected_in(interaction.message, parts[2]), live)
         except discord.HTTPException:
             log.exception("interaction %s failed", custom_id)
 
-    async def turn_off(self, interaction: discord.Interaction, host: str, serials: set[str]):
+    async def show(self, interaction: discord.Interaction, results, host, *, live: bool, **kw):
+        """Puts a fresh render on the /status message this click came from."""
+        s = self.live_track(interaction.message.id, interaction, live, host, kw)
+        view = self.render(results, host, live=live, **kw)
+        # so a live refresh that's mid-edit can't land on top of this
+        async with s.lock if s else contextlib.nullcontext():
+            if interaction.response.is_done():
+                await interaction.edit_original_response(view=view)
+            else:
+                await interaction.response.edit_message(view=view)
+
+    async def turn_off(self, interaction: discord.Interaction, host: str, serials: set[str], live: bool):
         results = self.last
         current = {d["serial"]: d for d in results.get(host, {}).get("devices", []) if d.get("serial")}
         known = {s: current.get(s) or self.store.seen(host).get(s) for s in serials}
         names = {s: views.device_label(self.store, {**k, "serial": s}) if k else s for s, k in known.items()}
         if not serials:
-            return await interaction.response.edit_message(
-                view=self.render(results, views.pick_host(results, host), notice="nothing's picked"))
-        await interaction.response.edit_message(
-            view=self.render(results, views.pick_host(results, host), selected=serials, busy=True,
-                             notice="turning off..."))
+            return await self.show(interaction, results, views.pick_host(results, host), live=live,
+                                   notice="nothing's picked")
+        await self.show(interaction, results, views.pick_host(results, host), live=live, selected=serials,
+                        busy=True, notice="turning off...")
 
         reachable = [s for s in sorted(serials) if (known[s] or {}).get("dongle")]
         lost = [names[s] for s in sorted(serials) if s not in reachable]
@@ -416,8 +452,7 @@ class TundraRemote(discord.Client):
         notice = "\n".join(notices)
 
         if not steamvr or not reachable:
-            return await interaction.edit_original_response(
-                view=self.render(results, views.pick_host(results, host), notice=notice))
+            return await self.show(interaction, results, views.pick_host(results, host), live=live, notice=notice)
 
         # SteamVR takes a moment to notice the devices dropped
         for _ in range(4):
@@ -426,4 +461,75 @@ class TundraRemote(discord.Client):
             devices = {d.get("serial"): d for d in results.get(host, {}).get("devices", [])}
             if not any(devices.get(s, {}).get("connected") for s in reachable):
                 break
-        await interaction.edit_original_response(view=self.render(results, views.pick_host(results, host), notice=notice))
+        await self.show(interaction, results, views.pick_host(results, host), live=live, notice=notice)
+
+    # live /status
+
+    def live_track(self, message_id: int, interaction: discord.Interaction, live: bool,
+                   host: str | None, kw: dict) -> Live | None:
+        """Starts, updates or stops live refreshes for a message after a click on it. Returns
+        its Live, even a stopped one, so the caller can wait out an edit it's in the middle of."""
+        s = self.live.get(message_id)
+        if not live:
+            self.live.pop(message_id, None)
+            return s
+        if s is None:
+            s = self.live[message_id] = Live(interaction, interaction.channel_id, time.monotonic())
+        if s.task is None or s.task.done():  # also after a restart, or if the loop crashed
+            s.task = asyncio.create_task(self.live_loop(message_id, s))
+        s.interaction, s.touched = interaction, time.monotonic()
+        s.host, s.selected = host, set(kw.get("selected", ()))
+        s.notice, s.busy = kw.get("notice"), kw.get("busy", False)
+        s.version += 1
+        return s
+
+    async def live_loop(self, message_id: int, s: Live):
+        while self.live.get(message_id) is s:
+            await asyncio.sleep(LIVE_EVERY)
+            if self.live.get(message_id) is not s or s.busy:
+                continue
+            if time.monotonic() - s.touched >= LIVE_FOR:
+                return await self.live_stop(message_id, s, "live turned off after 20 min without a click")
+            version = s.version
+            # several live messages can share one probe
+            results = self.last if time.monotonic() - self.last_at < LIVE_EVERY / 2 else await self.probe()
+            async with s.lock:
+                if self.live.get(message_id) is not s or s.version != version or s.busy:
+                    continue
+                view = self.render(results, views.pick_host(results, s.host), live=True,
+                                   selected=s.selected, notice=s.notice)
+                try:
+                    await self.live_edit(message_id, s, view)
+                except discord.HTTPException as e:
+                    log.info("live /status %s stopped: %s", message_id, e)
+                    self.live.pop(message_id, None)
+                    if time.monotonic() - s.touched < TOKEN_FOR + 50:
+                        # the bot can't edit it here, so say so while the token still can
+                        await self.live_off(s, "live turned off. without a click, discord only lets me "
+                                               "update this for 15 min here", s.interaction.edit_original_response)
+                    return
+
+    async def live_edit(self, message_id: int, s: Live, view):
+        """Edits through the latest click's token while it lasts, then as the bot, which only
+        works where the bot's in the channel (not user-installed dms)."""
+        if time.monotonic() - s.touched < TOKEN_FOR:
+            await s.interaction.edit_original_response(view=view)
+        else:
+            await self.get_partial_messageable(s.channel_id).get_partial_message(message_id).edit(view=view)
+
+    async def live_stop(self, message_id: int, s: Live, notice: str):
+        async with s.lock:
+            if self.live.get(message_id) is not s:
+                return
+            self.live.pop(message_id, None)
+            await self.live_off(s, notice, lambda view: self.live_edit(message_id, s, view))
+
+    async def live_off(self, s: Live, notice: str, edit):
+        """Shows a live message as not live anymore, with why."""
+        results = self.last or await self.probe()
+        view = self.render(results, views.pick_host(results, s.host), selected=s.selected,
+                           notice="\n".join(filter(None, [s.notice, notice])))
+        try:
+            await edit(view=view)
+        except discord.HTTPException as e:
+            log.info("couldn't show that live turned off: %s", e)
